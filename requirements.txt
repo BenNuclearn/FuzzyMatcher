@@ -1,0 +1,7 @@
+# Core data handling
+pandas>=2.0
+openpyxl>=3.1
+
+# Fuzzy matching
+rapidfuzz>=3.0
+
