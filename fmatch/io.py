@@ -23,16 +23,9 @@ def read_table(path: str | Path, sheet: Optional[str] = None) -> pd.DataFrame:
     if ext == ".csv":
         return pd.read_csv(p)
     if ext in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
-        # pandas returns a dict when sheet_name=None; default to first sheet instead
-        sheet_name = 0 if sheet is None else sheet
-        df_or_dict = pd.read_excel(p, sheet_name=sheet_name)
-        if isinstance(df_or_dict, dict):
-            # Fallback: pick the first sheet if a dict was returned
-            if not df_or_dict:
-                raise ValueError(f"Excel file has no sheets: {p}")
-            first_key = next(iter(df_or_dict))
-            return df_or_dict[first_key]
-        return df_or_dict
+        # Always return a DataFrame, not a dict
+        sheet_name = sheet if sheet is not None else 0
+        return pd.read_excel(p, sheet_name=sheet_name)
     raise ValueError(f"Unsupported file extension: {ext}")
 
 
@@ -72,3 +65,4 @@ def default_output_path(base_input_path: Path) -> Path:
 
 def list_columns(df: pd.DataFrame) -> list[str]:
     return [str(c) for c in df.columns]
+
