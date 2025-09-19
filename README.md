@@ -39,9 +39,20 @@ pipenv run python -m fmatch samples/base.csv samples/lookup.csv \
 Typical usage with your own files:
 
 ```bash
+# Single key
 pipenv run python -m fmatch base.csv lookup.xlsx \
   --base-key Name --lookup-key FullName \
   --take email,company --threshold 88 --scorer token_set_ratio
+
+# Multiple keys (composite match): comma-separate columns
+pipenv run python -m fmatch base.csv lookup.xlsx \
+  --base-key Name,ID --lookup-key FullName,ID \
+  --take email,company
+
+# Resolve ambiguous rows interactively
+pipenv run python -m fmatch base.csv lookup.xlsx \
+  --base-key Name --lookup-key FullName --take email \
+  --resolve-ambiguous
 ```
 
 If you omit `--base-key`, `--lookup-key` or `--take`, the CLI will list columns and prompt you to select them interactively.
@@ -54,6 +65,18 @@ If you omit `--base-key`, `--lookup-key` or `--take`, the CLI will list columns 
 - Override with `--output <path>`.
 - New columns are prefixed (default `lk_`), e.g. `lk_email`.
 - Enable diagnostics with `--diagnostics` to add: `match_score`, `matched_lookup_key`, `match_count`.
+- Interactive resolution:
+  - `--resolve-ambiguous` prompts you to choose a candidate for rows that were ambiguous under the current policy.
+
+## Ambiguity Resolution
+
+- Enable prompts with `--resolve-ambiguous`. For each ambiguous base row the CLI shows:
+  - Base value and its normalized form.
+  - A numbered list of candidate lookup rows with scores and a short preview of the first few `--take` columns.
+- Choose a number to accept a candidate; press Enter to skip and leave ambiguous.
+- Tips if you see too many/too few candidates:
+  - Lower `--threshold` (e.g., 80) to include more candidates.
+  - Adjust `--top-n` to search more keys; set `--margin 0` to relax the tie-break.
 
 ## Matching Policy (Defaults)
 
@@ -63,6 +86,12 @@ If you omit `--base-key`, `--lookup-key` or `--take`, the CLI will list columns 
 - Candidate set: `--top-n 3` from RapidFuzz extract.
 - Tie handling: accept a match only if there’s no tie at the top score and (by default) the top score exceeds the second-best by `--margin 3` points; otherwise mark as ambiguous.
 - Duplicate lookup keys: if the accepted normalized key maps to multiple lookup rows, mark as ambiguous.
+- Multiple keys: the specified columns are joined into a composite key before normalization and matching.
+
+## Multiple Keys
+
+- Provide comma-separated columns for `--base-key` and `--lookup-key` when you need a stricter match such as `Name` + `ID`.
+- The composite key uses `" | "` as a joiner for readability; normalization then trims, collapses spaces, and case-folds.
 
 ## XLSX Notes
 

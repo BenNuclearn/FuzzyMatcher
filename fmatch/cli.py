@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 
 from . import io as io_mod
 from .enrich import EnrichOptions, enrich
-from .match import MatchPolicy, NormalizeOptions, match_all, normalize_series, build_lookup_index, match_one, top_candidates, MatchResult
+from .match import (
+    MatchPolicy,
+    NormalizeOptions,
+    normalize_series,
+    build_lookup_index,
+    match_one,
+    top_candidates,
+    MatchResult,
+)
 
 
 def _prompt_select(prompt: str, options: List[str], multi: bool = False) -> List[str]:
@@ -34,8 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("base_path", help="Base CSV/XLSX file path")
     p.add_argument("lookup_path", help="Lookup CSV/XLSX file path")
-    p.add_argument("--base-key", dest="base_key", help="Key column in base file")
-    p.add_argument("--lookup-key", dest="lookup_key", help="Key column in lookup file")
+    p.add_argument(
+        "--base-key",
+        dest="base_key",
+        help="Key column(s) in base (comma-separated for multiple)",
+    )
+    p.add_argument(
+        "--lookup-key",
+        dest="lookup_key",
+        help="Key column(s) in lookup (comma-separated for multiple)",
+    )
     p.add_argument(
         "--take",
         dest="take_cols",
@@ -75,13 +91,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     base_cols = io_mod.list_columns(base_df)
     lookup_cols = io_mod.list_columns(lookup_df)
 
-    base_key = args.base_key
-    if not base_key or base_key not in base_cols:
-        [base_key] = _prompt_select("Select base key column:", base_cols)
+    def _parse_keys(arg_val: Optional[str]) -> Optional[List[str]]:
+        if not arg_val:
+            return None
+        parts = [c.strip() for c in arg_val.split(",") if c.strip()]
+        return parts or None
 
-    lookup_key = args.lookup_key
-    if not lookup_key or lookup_key not in lookup_cols:
-        [lookup_key] = _prompt_select("Select lookup key column:", lookup_cols)
+    base_keys = _parse_keys(args.base_key)
+    if not base_keys or any(k not in base_cols for k in base_keys):
+        base_keys = _prompt_select(
+            "Select base key column(s):", base_cols, multi=True
+        )
+
+    lookup_keys = _parse_keys(args.lookup_key)
+    if not lookup_keys or any(k not in lookup_cols for k in lookup_keys):
+        lookup_keys = _prompt_select(
+            "Select lookup key column(s):", lookup_cols, multi=True
+        )
 
     take_cols: List[str]
     if args.take_cols:
@@ -108,9 +134,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         scorer=args.scorer,
     )
 
-    # Run matching (keep normalized/index to optionally resolve ambiguous)
-    base_norm = normalize_series(base_df[base_key], norm)
-    lookup_norm = normalize_series(lookup_df[lookup_key], norm)
+    # Build composite key series then normalize
+    base_raw = _composite_key_series(base_df, base_keys)
+    lookup_raw = _composite_key_series(lookup_df, lookup_keys)
+    base_norm = normalize_series(base_raw, norm)
+    lookup_norm = normalize_series(lookup_raw, norm)
     index = build_lookup_index(list(lookup_norm))
     results: List[MatchResult] = []
     for _, b in base_norm.items():
@@ -120,10 +148,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.resolve_ambiguous:
         _resolve_ambiguous_interactive(
             results,
-            base_values=list(base_df[base_key].astype(str).fillna("")),
+            base_values=list(base_raw.astype(str).fillna("")),
             base_norm=list(base_norm),
             lookup_df=lookup_df,
-            lookup_key_col=lookup_key,
+            lookup_key_cols=lookup_keys,
             take_cols=take_cols,
             lookup_index=index,
             policy=policy,
@@ -158,7 +186,7 @@ def _resolve_ambiguous_interactive(
     base_values: Sequence[str],
     base_norm: Sequence[str],
     lookup_df: pd.DataFrame,
-    lookup_key_col: str,
+    lookup_key_cols: Sequence[str],
     take_cols: Sequence[str],
     lookup_index,
     policy: MatchPolicy,
@@ -183,7 +211,9 @@ def _resolve_ambiguous_interactive(
         for j, (row_idx, norm_key, score) in enumerate(cands):
             preview = []
             try:
-                orig_key = str(lookup_df.iloc[row_idx][lookup_key_col])
+                orig_key = " | ".join(
+                    [str(lookup_df.iloc[row_idx][k]) for k in lookup_key_cols]
+                )
             except Exception:
                 orig_key = "<err>"
             for c in take_cols[:3]:  # limit preview to first 3 columns
@@ -216,3 +246,16 @@ def _resolve_ambiguous_interactive(
             except ValueError:
                 pass
             print("  Invalid selection. Enter a number or blank to skip.")
+
+
+def _composite_key_series(df: pd.DataFrame, cols: Sequence[str]) -> pd.Series:
+    """Build a composite string key by joining multiple columns.
+
+    Joins with " | " for readability; downstream normalization handles spacing/case.
+    """
+    if not cols:
+        raise ValueError("At least one key column is required")
+    s = df[cols[0]].astype(str).fillna("")
+    for c in cols[1:]:
+        s = s + " | " + df[c].astype(str).fillna("")
+    return s

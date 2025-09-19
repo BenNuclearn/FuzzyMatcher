@@ -102,6 +102,39 @@ class TestCLI(unittest.TestCase):
             df = pd.read_csv(out_path)
             self.assertEqual(df.loc[0, "lk_email"], "a1@example.com")
 
+    def test_cli_multi_key_composite(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            base = pd.DataFrame({"Name": ["Alice"], "ID": ["123"]})
+            lookup = pd.DataFrame(
+                {
+                    "FullName": ["Alice", "Alice"],
+                    "ID": ["123", "999"],
+                    "email": ["a123@example.com", "a999@example.com"],
+                }
+            )
+            base_path = td / "base.csv"
+            lookup_path = td / "lookup.csv"
+            base.to_csv(base_path, index=False)
+            lookup.to_csv(lookup_path, index=False)
+
+            code = main(
+                [
+                    str(base_path),
+                    str(lookup_path),
+                    "--base-key",
+                    "Name,ID",
+                    "--lookup-key",
+                    "FullName,ID",
+                    "--take",
+                    "email",
+                ]
+            )
+            self.assertEqual(code, 0)
+            out_path = base_path.with_name("base.enriched.csv")
+            df = pd.read_csv(out_path)
+            self.assertEqual(df.loc[0, "lk_email"], "a123@example.com")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
