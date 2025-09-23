@@ -47,7 +47,7 @@ class MatchPolicy:
     threshold: int = 85
     top_n: int = 3
     tie_margin: int = 3  # minimum lead over second-best; set 0 to disable
-    scorer: str = "WRatio"  # or "token_set_ratio"
+    scorer: str = "smart"  # or "token_set_ratio"/"WRatio"
 
 
 def _get_scorer(name: str):
@@ -55,6 +55,73 @@ def _get_scorer(name: str):
         raise RuntimeError(
             "rapidfuzz is required. Please `pip install rapidfuzz`."
         )
+    # Helper utilities for smart scoring
+    def _tokens(text: str) -> List[str]:
+        return [t for t in __import__("re").split(r"[^0-9a-zA-Z]+", text) if t]
+
+    # Very small default stopword list for organization/company suffixes and generics
+    STOPWORDS = {"inc", "inc.", "llc", "l.l.c", "co", "co.", "company", "corp", "corporation", "station", "plant", "the"}
+
+    def _initials(text: str) -> str:
+        toks = _tokens(text)
+        out = "".join(t[0] for t in toks if t and t[0].isalpha())
+        return out
+
+    def _smart_scorer(a: str, b: str, *, processor=None, score_cutoff: float = 0.0, score_hint=None) -> float:
+        # Apply optional processor consistent with RapidFuzz API
+        if processor is not None:
+            try:
+                a_proc = processor(a)
+                b_proc = processor(b)
+            except Exception:
+                a_proc, b_proc = a, b
+        else:
+            a_proc, b_proc = a, b
+
+        # Base scores from robust metrics
+        ts = fuzz.token_set_ratio(a_proc, b_proc)
+        pr = fuzz.partial_ratio(a_proc, b_proc)
+        # Segment-aware: if base has hyphens or pipes, compare segments
+        seg_scores = []
+        for seg in __import__("re").split(r"[-|]", a_proc):
+            seg = seg.strip()
+            if seg:
+                seg_scores.append(fuzz.token_set_ratio(seg, b_proc))
+        seg_best = max(seg_scores) if seg_scores else 0
+
+        base_best = max(ts, pr, seg_best)
+
+        # Acronym/initialism awareness
+        a_inits = _initials(a_proc)
+        b_inits = _initials(b_proc)
+        bonus = 0
+
+        # If a contains a short token equal to b's initials, strongly prefer
+        a_tokens = _tokens(a_proc)
+        a_acronyms = {t for t in a_tokens if t.isalpha() and 2 <= len(t) <= 6}
+        if b_inits and b_inits.lower() in {x.lower() for x in a_acronyms}:
+            base_best = max(base_best, 92.0)
+        # If overall initials match, add a smaller boost
+        if a_inits and b_inits and a_inits[0:3].lower() == b_inits[0:3].lower():
+            bonus = 5
+
+        # Prefer matches that contain all tokens from the left-most segment (pre-hyphen)
+        import re as _re
+        parts = [p.strip() for p in _re.split(r"[-|]", a_proc) if p.strip()]
+        if parts:
+            left_tokens = [t.lower() for t in _tokens(parts[0]) if t]
+            left_tokens_nostop = [t for t in left_tokens if t not in STOPWORDS]
+            b_tok_set = {t.lower() for t in _tokens(b_proc)}
+            if left_tokens_nostop and set(left_tokens_nostop).issubset(b_tok_set):
+                # Strong boost when the candidate fully contains the left segment
+                base_best = max(base_best, 96.0)
+
+        score = min(100.0, float(base_best + bonus))
+        # Respect score_cutoff per RapidFuzz protocol
+        if score < score_cutoff:
+            return 0.0
+        return score
+
     # Map simple names to scorer functions
     mapping = {
         "WRatio": fuzz.WRatio,
@@ -62,6 +129,8 @@ def _get_scorer(name: str):
         "token_set_ratio": fuzz.token_set_ratio,
         "token_sort_ratio": fuzz.token_sort_ratio,
         "partial_ratio": fuzz.partial_ratio,
+        "partial_token_set_ratio": fuzz.partial_token_set_ratio,
+        "smart": _smart_scorer,
     }
     return mapping.get(name, fuzz.WRatio)
 
@@ -102,11 +171,17 @@ def top_candidates(
     if not base_key_norm or not choices:
         return []
     scorer = _get_scorer(policy.scorer)
+    # Adaptive limit: for short or segmented keys, consider a few more candidates
+    import re as _re
+    toks = [t for t in _re.split(r"[^0-9a-zA-Z]+", base_key_norm) if t]
+    adaptive_limit = max(policy.top_n, 1)
+    if ("-" in base_key_norm or "|" in base_key_norm) or len(toks) <= 3:
+        adaptive_limit = max(adaptive_limit, 10)
     candidates = process.extract(
         base_key_norm,
         choices,
         scorer=scorer,
-        limit=max(policy.top_n, 1),
+        limit=adaptive_limit,
     )
     valid = [(c, float(s)) for c, s, _ in candidates if s >= policy.threshold]
     rows_expanded: List[Tuple[int, str, float]] = []
@@ -132,11 +207,17 @@ def match_one(
         return MatchResult(None, None, None, 0, "unmatched")
 
     scorer = _get_scorer(policy.scorer)
+    # Adaptive limit mirroring top_candidates
+    import re as _re
+    toks = [t for t in _re.split(r"[^0-9a-zA-Z]+", base_key_norm) if t]
+    adaptive_limit = max(policy.top_n, 1)
+    if ("-" in base_key_norm or "|" in base_key_norm) or len(toks) <= 3:
+        adaptive_limit = max(adaptive_limit, 10)
     candidates = process.extract(
         base_key_norm,
         choices,
         scorer=scorer,
-        limit=max(policy.top_n, 1),
+        limit=adaptive_limit,
     )
 
     # Filter by threshold

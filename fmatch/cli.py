@@ -62,9 +62,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threshold", type=int, default=85, help="Match threshold (0-100)")
     p.add_argument(
         "--scorer",
-        default="WRatio",
-        choices=["WRatio", "ratio", "token_set_ratio", "token_sort_ratio", "partial_ratio"],
-        help="RapidFuzz scorer",
+        default="smart",
+        choices=[
+            "smart",
+            "WRatio",
+            "ratio",
+            "token_set_ratio",
+            "token_sort_ratio",
+            "partial_ratio",
+            "partial_token_set_ratio",
+        ],
+        help="Scorer (smart=acronym/segment aware)",
     )
     p.add_argument("--top-n", type=int, default=3, help="Top-N candidates to consider")
     p.add_argument("--margin", type=int, default=3, help="Tie-break margin over second best")
@@ -73,10 +81,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-casefold", action="store_true", help="Disable case folding")
     p.add_argument("--no-trim", action="store_true", help="Disable whitespace trim/collapse")
     p.add_argument("--alnum-only", action="store_true", help="Keep only alphanumeric during normalization")
+    # Ambiguity resolution on by default; allow explicit opt-out
     p.add_argument(
         "--resolve-ambiguous",
+        dest="resolve_ambiguous",
         action="store_true",
-        help="Interactively resolve ambiguous matches by choosing a candidate",
+        default=True,
+        help="Interactively resolve ambiguous matches by choosing a candidate (default)",
+    )
+    p.add_argument(
+        "--no-resolve-ambiguous",
+        dest="resolve_ambiguous",
+        action="store_false",
+        help="Disable interactive resolution and leave ambiguous rows unresolved",
     )
     return p
 
@@ -195,9 +212,35 @@ def _resolve_ambiguous_interactive(
 
     Modifies `results` in place when user selects a candidate.
     """
+    # Cache of user decisions: normalized base value -> chosen lookup row index
+    decision_cache: dict[str, int] = {}
+
     for i, res in enumerate(results):
         if res.reason != "ambiguous":
             continue
+        # Auto-apply prior decision for identical base values
+        if base_norm[i] in decision_cache:
+            row_idx = decision_cache[base_norm[i]]
+            # Use the exact normalized key from lookup for diagnostics if available
+            norm_key = None
+            try:
+                # Find the normalized key corresponding to this row index
+                for k, rows in lookup_index.items():
+                    if row_idx in rows:
+                        norm_key = k
+                        break
+            except Exception:
+                norm_key = None
+            results[i] = MatchResult(
+                row_index=row_idx,
+                score=None,
+                matched_key=norm_key,
+                candidate_count=res.candidate_count,
+                reason="matched",
+            )
+            print(f"Auto-resolved row {i} using prior decision for identical base value.")
+            continue
+
         print("\nAmbiguous match for base row", i)
         print("  Base value:", base_values[i])
         print("  (normalized):", base_norm[i])
@@ -207,32 +250,72 @@ def _resolve_ambiguous_interactive(
             print("  No candidates above threshold. Skipping.")
             continue
 
-        # Display candidates with a small preview
-        for j, (row_idx, norm_key, score) in enumerate(cands):
-            preview = []
-            try:
-                orig_key = " | ".join(
-                    [str(lookup_df.iloc[row_idx][k]) for k in lookup_key_cols]
-                )
-            except Exception:
-                orig_key = "<err>"
-            for c in take_cols[:3]:  # limit preview to first 3 columns
+        def _print_candidates(tag: str, cand_list):
+            print(tag)
+            for j, (row_idx, norm_key, score) in enumerate(cand_list):
+                preview = []
                 try:
-                    preview.append(f"{c}={lookup_df.iloc[row_idx][c]}")
+                    orig_key = " | ".join(
+                        [str(lookup_df.iloc[row_idx][k]) for k in lookup_key_cols]
+                    )
                 except Exception:
-                    preview.append(f"{c}=<na>")
-            preview_str = ", ".join(preview)
-            print(f"  [{j}] score={score:.1f} key='{orig_key}' {('('+preview_str+')') if preview else ''}")
+                    orig_key = "<err>"
+                for c in take_cols[:3]:  # limit preview to first 3 columns
+                    try:
+                        preview.append(f"{c}={lookup_df.iloc[row_idx][c]}")
+                    except Exception:
+                        preview.append(f"{c}=<na>")
+                preview_str = ", ".join(preview)
+                print(
+                    f"  [{j}] score={score:.1f} key='{orig_key}' {('('+preview_str+')') if preview else ''}"
+                )
+
+        display_cands = list(cands)
+        _print_candidates("  Candidates:", display_cands)
+        print("  Commands: enter a number; 's <query>' to search; '/<query>' also searches; blank to skip")
 
         while True:
             raw = input("Select candidate index to accept (blank=skip): ").strip()
             if raw == "":
                 print("  Skipped; leaving as ambiguous.")
                 break
+            # Search command
+            if raw.startswith("s ") or raw.startswith("/"):
+                query = raw[2:] if raw.startswith("s ") else raw[1:]
+                if not query.strip():
+                    print("  Provide a search query after 's '.")
+                    continue
+                try:
+                    from rapidfuzz import process as _rf_process  # type: ignore
+                    from rapidfuzz import fuzz as _rf_fuzz  # type: ignore
+                except Exception:
+                    print("  Search requires rapidfuzz installed.")
+                    continue
+                # Build list of all normalized keys
+                all_keys = list(lookup_index.keys())
+                # Normalize query similarly to base normalization assumptions: lower/trim
+                q = query.strip().casefold()
+                scorer = _rf_fuzz.token_set_ratio if policy.scorer != "smart" else _rf_fuzz.token_set_ratio
+                found = _rf_process.extract(q, all_keys, scorer=scorer, limit=10)
+                # Append unique row candidates from search to display list
+                existing_rows = {r for r, _, _ in display_cands}
+                added = 0
+                for k, s, _ in found:
+                    for row_idx in lookup_index.get(k, []):
+                        if row_idx in existing_rows:
+                            continue
+                        display_cands.append((row_idx, k, float(s)))
+                        existing_rows.add(row_idx)
+                        added += 1
+                if added == 0:
+                    print("  No new results for your search.")
+                else:
+                    _print_candidates("  Updated candidates (includes search results):", display_cands)
+                continue
             try:
                 sel = int(raw)
-                if 0 <= sel < len(cands):
-                    row_idx, norm_key, score = cands[sel]
+                if 0 <= sel < len(display_cands):
+                    row_idx, norm_key, score = display_cands[sel]
                     # Update result in place to a resolved match
                     results[i] = MatchResult(
                         row_index=row_idx,
@@ -241,6 +324,8 @@ def _resolve_ambiguous_interactive(
                         candidate_count=res.candidate_count,
                         reason="matched",
                     )
+                    # Cache for identical base values later in the run
+                    decision_cache[base_norm[i]] = row_idx
                     print(f"  Accepted candidate at lookup row {row_idx}.")
                     break
             except ValueError:

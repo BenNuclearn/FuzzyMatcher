@@ -4,7 +4,7 @@ Small CLI to enrich a “base” CSV/XLSX with columns from a “lookup” file 
 
 - Reads CSV or XLSX (first sheet by default or `--sheet`)
 - Normalizes text (trim/collapse/casefold; optional alnum-only)
-- Uses RapidFuzz (default `WRatio`) with a deterministic selection policy
+- Uses RapidFuzz with a deterministic selection policy; default scorer `smart` (acronym/segment aware)
 - Appends selected lookup columns to base, with prefix (default `lk_`)
 - Optional diagnostics columns and concise summary output
 
@@ -42,17 +42,17 @@ Typical usage with your own files:
 # Single key
 pipenv run python -m fmatch base.csv lookup.xlsx \
   --base-key Name --lookup-key FullName \
-  --take email,company --threshold 88 --scorer token_set_ratio
+  --take email,company --threshold 88
 
 # Multiple keys (composite match): comma-separate columns
 pipenv run python -m fmatch base.csv lookup.xlsx \
   --base-key Name,ID --lookup-key FullName,ID \
   --take email,company
 
-# Resolve ambiguous rows interactively
+# Resolve ambiguous rows interactively (default)
 pipenv run python -m fmatch base.csv lookup.xlsx \
-  --base-key Name --lookup-key FullName --take email \
-  --resolve-ambiguous
+  --base-key Name --lookup-key FullName --take email
+  # add --no-resolve-ambiguous to disable prompts
 ```
 
 If you omit `--base-key`, `--lookup-key` or `--take`, the CLI will list columns and prompt you to select them interactively.
@@ -65,15 +65,18 @@ If you omit `--base-key`, `--lookup-key` or `--take`, the CLI will list columns 
 - Override with `--output <path>`.
 - New columns are prefixed (default `lk_`), e.g. `lk_email`.
 - Enable diagnostics with `--diagnostics` to add: `match_score`, `matched_lookup_key`, `match_count`.
-- Interactive resolution:
-  - `--resolve-ambiguous` prompts you to choose a candidate for rows that were ambiguous under the current policy.
+- Interactive resolution (default):
+  - Prompts you to choose a candidate for rows that were ambiguous under the current policy.
+  - Use `--no-resolve-ambiguous` to disable and leave ambiguous rows unresolved.
 
 ## Ambiguity Resolution
 
-- Enable prompts with `--resolve-ambiguous`. For each ambiguous base row the CLI shows:
+- Enabled by default; disable with `--no-resolve-ambiguous`. For each ambiguous base row the CLI shows:
   - Base value and its normalized form.
   - A numbered list of candidate lookup rows with scores and a short preview of the first few `--take` columns.
 - Choose a number to accept a candidate; press Enter to skip and leave ambiguous.
+- Repeated identical base values: after you resolve once, identical future rows auto-resolve to the same choice in this run.
+- Inline search: at the prompt, type `s <query>` (or `/query`) to search the lookup and add results to the candidate list.
 - Tips if you see too many/too few candidates:
   - Lower `--threshold` (e.g., 80) to include more candidates.
   - Adjust `--top-n` to search more keys; set `--margin 0` to relax the tie-break.
@@ -81,7 +84,8 @@ If you omit `--base-key`, `--lookup-key` or `--take`, the CLI will list columns 
 ## Matching Policy (Defaults)
 
 - Normalization: trim, collapse spaces, lowercase; `--alnum-only` to keep only letters/digits.
-- Scorer: `WRatio` (options: `ratio`, `token_set_ratio`, `token_sort_ratio`, `partial_ratio`).
+- Scorer: `smart` (options: `smart`, `WRatio`, `ratio`, `token_set_ratio`, `token_sort_ratio`, `partial_ratio`, `partial_token_set_ratio`).
+- smart scoring combines token-set and partial matching, adds hyphen/segment awareness, and boosts candidates whose initials match acronym-like tokens in the base (e.g., `NPPD` ↔ `Nebraska Public Power District`).
 - Threshold: `--threshold 85`.
 - Candidate set: `--top-n 3` from RapidFuzz extract.
 - Tie handling: accept a match only if there’s no tie at the top score and (by default) the top score exceeds the second-best by `--margin 3` points; otherwise mark as ambiguous.
