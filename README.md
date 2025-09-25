@@ -34,6 +34,14 @@ pipenv run python scripts/smoke_e2e.py
 # or directly:
 pipenv run python -m fmatch samples/base.csv samples/lookup.csv \
   --base-key Name --lookup-key FullName --take email,company
+
+Launch the simple UI (Tkinter):
+
+```bash
+pipenv run python -m fmatch.gui
+```
+
+Note: The GUI requires a Python build with Tk support. On macOS, the python.org installer includes Tk; pyenv builds need Tcl/Tk installed and configured. If Tk is unavailable, use the CLI instead.
 ```
 
 Typical usage with your own files:
@@ -53,6 +61,42 @@ pipenv run python -m fmatch base.csv lookup.xlsx \
 pipenv run python -m fmatch base.csv lookup.xlsx \
   --base-key Name --lookup-key FullName --take email
   # add --no-resolve-ambiguous to disable prompts
+
+## Selecting Columns with --take
+
+- You can pass column names, 1-based indices, or ranges (inclusive):
+  - Names: `--take email,company`
+  - Indices: `--take 3,5,7` selects the 3rd, 5th, and 7th lookup columns
+  - Ranges: `--take 3-34` selects columns 3 through 34
+  - Mixed: `--take email,3-5,10`
+  - Indices are 1-based and refer to the current order of columns in the lookup file.
+
+## Overwriting Base Columns and Appending New Contacts
+
+- Overwrite matched fields directly into your Salesforce export (base):
+  - `--overwrite-base` writes matched values into identically named base columns (no `lk_` prefix).
+  - Add `--overwrite-if-empty` to only fill where the base field is empty/NA.
+- Add new rows for contacts that are in the roladex (lookup) but not in Salesforce (base):
+  - `--append-unmatched-from-lookup` appends those lookup rows into the output.
+- Optionally drop duplicates after merge:
+  - `--dedupe-by Name,AccountId` with `--dedupe-keep first|last`.
+
+Example end-to-end for Salesforce export and roladex:
+
+```bash
+pipenv run python -m fmatch salesforce_contacts.xlsx roladex.xlsx \
+  --base-key Name,AccountId --lookup-key Name,AccountId \
+  --take Email,Phone,Title --overwrite-base --overwrite-if-empty \
+  --append-unmatched-from-lookup \
+  --dedupe-by Name,AccountId --dedupe-keep first
+```
+
+# Add unmatched base rows into the lookup
+pipenv run python -m fmatch base.csv lookup.xlsx \
+  --base-key Name --lookup-key FullName \
+  --take email,company --update-lookup \
+  --lookup-output lookup.updated.xlsx \
+  --fill-take-from-base  # copies values for --take columns from base when available
 ```
 
 If you omit `--base-key`, `--lookup-key` or `--take`, the CLI will list columns and prompt you to select them interactively.
@@ -68,6 +112,10 @@ If you omit `--base-key`, `--lookup-key` or `--take`, the CLI will list columns 
 - Interactive resolution (default):
   - Prompts you to choose a candidate for rows that were ambiguous under the current policy.
   - Use `--no-resolve-ambiguous` to disable and leave ambiguous rows unresolved.
+- Optional lookup updates:
+  - With `--update-lookup`, unmatched base rows are appended as new entries to an updated copy of the lookup.
+  - By default writes next to the lookup as `<lookup>.updated.<ext>`; override with `--lookup-output`.
+  - Use `--fill-take-from-base` to populate the chosen `--take` columns from base when columns share the same name.
 
 ## Ambiguity Resolution
 

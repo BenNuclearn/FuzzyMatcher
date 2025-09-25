@@ -266,3 +266,86 @@ def match_all(
         res = match_one(b, index, policy)
         results.append(res)
     return results
+
+
+def match_one_with_secondary(
+    base_primary_norm: str,
+    base_secondary_norm: Optional[Tuple[str, ...]],
+    lookup_key_to_rows: Dict[str, List[int]],
+    lookup_secondary_norm_rows: Sequence[Optional[Tuple[str, ...]]],
+    policy: MatchPolicy,
+    secondary_boost: int = 10,
+) -> MatchResult:
+    """Match using primary key for candidate search and secondary for boosting.
+
+    - Uses fuzzy matching on the normalized primary key to get candidate keys.
+    - Expands to rows and adds a fixed boost to the row's score when all
+      secondary values exactly match (normalized, non-empty).
+    - Applies threshold/tie-margin on the adjusted row-level scores.
+    """
+    if process is None:
+        raise RuntimeError(
+            "rapidfuzz is required. Please `pip install rapidfuzz`."
+        )
+    choices = list(lookup_key_to_rows.keys())
+    if not base_primary_norm:
+        return MatchResult(None, None, None, 0, "unmatched")
+    if not choices:
+        return MatchResult(None, None, None, 0, "unmatched")
+
+    scorer = _get_scorer(policy.scorer)
+    import re as _re
+    toks = [t for t in _re.split(r"[^0-9a-zA-Z]+", base_primary_norm) if t]
+    adaptive_limit = max(policy.top_n, 1)
+    if ("-" in base_primary_norm or "|" in base_primary_norm) or len(toks) <= 3:
+        adaptive_limit = max(adaptive_limit, 10)
+
+    candidates = process.extract(
+        base_primary_norm,
+        choices,
+        scorer=scorer,
+        limit=adaptive_limit,
+    )
+
+    # Filter by threshold at key-level first
+    valid = [(c, float(s)) for c, s, _ in candidates if s >= policy.threshold]
+    if not valid:
+        return MatchResult(None, None, None, 0, "unmatched")
+
+    # Expand to rows and compute adjusted row-level scores
+    row_scores: List[Tuple[int, str, float]] = []  # (row_idx, norm_key, adj_score)
+    for key, score in sorted(valid, key=lambda x: x[1], reverse=True):
+        for row_idx in lookup_key_to_rows.get(key, []):
+            adj = float(score)
+            # Apply secondary boost when all secondary fields match and are not empty
+            if base_secondary_norm is not None:
+                try:
+                    cand_sec = lookup_secondary_norm_rows[row_idx]
+                except Exception:
+                    cand_sec = None
+                if cand_sec is not None and len(cand_sec) == len(base_secondary_norm):
+                    if all((a != "" and a == b) for a, b in zip(base_secondary_norm, cand_sec)):
+                        adj = min(100.0, adj + float(secondary_boost))
+            row_scores.append((row_idx, key, adj))
+
+    if not row_scores:
+        return MatchResult(None, None, None, 0, "unmatched")
+
+    # Sort by adjusted score
+    row_scores.sort(key=lambda x: x[2], reverse=True)
+
+    # Apply margin/tie rules on row-level scores
+    top_row_idx, top_key, top_score = row_scores[0]
+    # Ties at top
+    top_peers = [r for r in row_scores if r[2] == top_score]
+    if len(top_peers) > 1:
+        # Multiple rows at identical top score
+        return MatchResult(None, top_score, top_key, len(row_scores), "ambiguous")
+
+    # Margin over second best
+    if policy.tie_margin and len(row_scores) > 1:
+        second_score = row_scores[1][2]
+        if (top_score - second_score) < policy.tie_margin:
+            return MatchResult(None, top_score, top_key, len(row_scores), "ambiguous")
+
+    return MatchResult(top_row_idx, top_score, top_key, len(row_scores), "matched")
