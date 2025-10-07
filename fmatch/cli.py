@@ -265,6 +265,20 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     take_cols: List[str] = _parse_take(args.take_cols, lookup_cols)
 
+    # Parse mappings
+    mappings: Optional[dict] = None
+    if args.mappings:
+        mappings = {}
+        for tok in [t for t in args.mappings.split(",") if t.strip()]:
+            if ":" not in tok:
+                raise SystemExit(f"Invalid --map entry '{tok}'. Use src:dst format.")
+            src, dst = tok.split(":", 1)
+            src = src.strip()
+            dst = dst.strip()
+            if not src or not dst:
+                raise SystemExit(f"Invalid --map entry '{tok}'. Use non-empty src:dst.")
+            mappings[src] = dst
+
     # Validate columns (already validated in _parse_take for names and indices)
 
     # Normalization and match policy
@@ -687,19 +701,6 @@ def _resolve_ambiguous_interactive(
                         existing_rows.add(row_idx)
                         added += 1
                 if added == 0:
-    # Parse mappings
-    mappings: Optional[dict] = None
-    if args.mappings:
-        mappings = {}
-        for tok in [t for t in args.mappings.split(",") if t.strip()]:
-            if ":" not in tok:
-                raise SystemExit(f"Invalid --map entry '{tok}'. Use src:dst format.")
-            src, dst = tok.split(":", 1)
-            src = src.strip()
-            dst = dst.strip()
-            if not src or not dst:
-                raise SystemExit(f"Invalid --map entry '{tok}'. Use non-empty src:dst.")
-            mappings[src] = dst
                     print("  No new results for your search.")
                 else:
                     _print_candidates("  Updated candidates (includes search results):", display_cands)

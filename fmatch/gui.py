@@ -54,6 +54,9 @@ class App(tk.Tk):
         self.output_path = tk.StringVar()
         self.lookup_output_path = tk.StringVar()
         self.prefix = tk.StringVar(value="lk_")
+        # Mapping and new-field behavior
+        self.mappings = tk.StringVar(value="")
+        self.new_field_mode = tk.StringVar(value="default")
 
         self.threshold = tk.IntVar(value=85)
         self.top_n = tk.IntVar(value=3)
@@ -177,7 +180,8 @@ class App(tk.Tk):
         tk.Entry(opt, textvariable=self.lookup_output_path, width=30).grid(row=3, column=6, sticky="we")
         tk.Button(opt, text="Browse", command=self._pick_lookup_output).grid(row=3, column=7)
         tk.Label(opt, text="Mappings (src:dst,...) ").grid(row=3, column=8, sticky="w")
-        tk.Entry(opt, textvariable=self.mappings, width=28).grid(row=3, column=9, columnspan=2, sticky="we")
+        tk.Entry(opt, textvariable=self.mappings, width=28).grid(row=3, column=9, sticky="we")
+        tk.Button(opt, text="Map...", command=self._open_map_dialog).grid(row=3, column=10, padx=4)
 
         # Row 5
         tk.Label(opt, text="Dedupe by (comma names)").grid(row=4, column=0, sticky="w")
@@ -289,6 +293,8 @@ class App(tk.Tk):
                 raise ValueError("Please select base and lookup key columns.")
             if not take_cols:
                 raise ValueError("Please select at least one 'take' column.")
+            # Ensure mappings reflect current take selection if needed
+            # (No hard requirement; Map dialog reads current selection when opened.)
 
             # Ensure primary selection options reflect current selection
             self._sync_primary_options()
@@ -602,6 +608,85 @@ class App(tk.Tk):
                 raise ValueError(f"Invalid mapping '{tok}'. Use non-empty src:dst.")
             out[src] = dst
         return out
+
+    def _open_map_dialog(self) -> None:
+        # Build mapping via dropdowns from selected take columns to base columns
+        take_cols = self._get_selected(self.lb_take, self.lookup_cols)
+        if not take_cols:
+            messagebox.showinfo("Select columns", "Please select one or more lookup take columns first.")
+            return
+        base_cols = list(self.base_cols)
+        # Parse existing mapping string safely (ignore validation errors here)
+        try:
+            current = self._parse_mappings() or {}
+        except Exception:
+            current = {}
+        dlg = MapDialog(self, take_cols, base_cols, current)
+        result = dlg.show()
+        if result is not None:
+            # Serialize mapping to string
+            parts = [f"{k}:{v}" for k, v in result.items()]
+            self.mappings.set(",".join(parts))
+
+    
+
+    
+
+
+class MapDialog(tk.Toplevel):
+    def __init__(self, master: tk.Misc, sources: List[str], base_cols: List[str], current: dict) -> None:
+        super().__init__(master)
+        self.title("Map Lookup → Base Columns")
+        self.transient(master)
+        self.grab_set()
+        self.resizable(True, True)
+
+        self.sources = sources
+        self.base_cols = base_cols
+        self.current = current
+        self._vars: dict[str, tk.StringVar] = {}
+        self._result = None
+
+        tk.Label(self, text="Select a base column for each lookup column (leave as '<same>' to keep name)").pack(anchor="w", padx=10, pady=(10, 6))
+        frm = tk.Frame(self)
+        frm.pack(fill=tk.BOTH, expand=True, padx=10)
+
+        for i, src in enumerate(self.sources):
+            row = tk.Frame(frm)
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=src, width=28, anchor="w").pack(side=tk.LEFT)
+            var = tk.StringVar()
+            # Default selection: existing mapping if valid, else '<same>'
+            default_dst = self.current.get(src, src)
+            if default_dst not in self.base_cols:
+                default_dst = "<same>"
+            self._vars[src] = var
+            # Options: <same> + all base columns
+            opt = tk.OptionMenu(row, var, "<same>", *self.base_cols)
+            opt.pack(side=tk.LEFT)
+            var.set(default_dst)
+
+        btns = tk.Frame(self)
+        btns.pack(fill=tk.X, padx=10, pady=10)
+        tk.Button(btns, text="OK", command=self._accept).pack(side=tk.LEFT)
+        tk.Button(btns, text="Cancel", command=self._cancel).pack(side=tk.RIGHT)
+
+    def _accept(self) -> None:
+        out = {}
+        for src, var in self._vars.items():
+            dst = var.get().strip()
+            if dst and dst != "<same>":
+                out[src] = dst
+        self._result = out
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self):
+        self.wait_window(self)
+        return self._result
 
     def _resolve_ambiguous_gui(
         self,
